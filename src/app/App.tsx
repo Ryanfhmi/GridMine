@@ -1,9 +1,9 @@
 import { useState, useEffect, useMemo, FormEvent } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
-import { Zap, AlertTriangle, LayoutDashboard, BarChart3, Server, Settings, RefreshCw } from 'lucide-react';
+import { Zap, AlertTriangle, LayoutDashboard, BarChart3, Server, Settings, RefreshCw, DollarSign, Activity, ShieldCheck, ShieldAlert } from 'lucide-react';
 import { motion } from 'motion/react';
 import { supabase } from '../lib/supabase';
-import { useIoTData } from '../lib/useIoTData';
+import { useIoTData, useIoTDataForZones } from '../lib/useIoTData';
 import { calculateElectricityCost } from '../lib/calculateElectricityCost';
 import AIInsights from './AIInsights';
 
@@ -79,21 +79,87 @@ export default function App() {
   const [newDevicePower, setNewDevicePower] = useState(2.5);
   const zoneOptions = ['Zone 1', 'Zone 2', 'Zone 3'];
 
-  // Gunakan hook useIoTData
-  const { data: zona1Data, loading } = useIoTData();
+  // Gunakan satu hook untuk mengambil data kedua zona sekaligus
+  const { data: iotData, loading: loadingData, error: dataError } = useIoTDataForZones(['Zona_1', 'Zona_2']);
+  const zona1Data = iotData.filter((item) => item.device === 'Zona_1');
+  const zona2Data = iotData.filter((item) => item.device === 'Zona_2');
 
-  // Transform data IoT menjadi format untuk LineChart
-  const energyData = useMemo(() => {
-    if (loading || zona1Data.length === 0) return [];
+  // 1. Gabungkan data Zona 1 dan Zona 2 menjadi satu array berdasarkan Waktu (Jam:Menit:Detik)
+  const combinedEnergyData = useMemo(() => {
+    const dataMap: Record<string, any> = {};
 
-    return zona1Data
-      .slice(-50)
-      .map((item) => ({
-        time: new Date(item.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
-        power: item.power,
-        apparent_power: item.apparent_power,
-      }));
-  }, [zona1Data, loading]);
+    zona1Data.forEach((item) => {
+      const timeStr = new Date(item.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      if (!dataMap[timeStr]) dataMap[timeStr] = { time: timeStr };
+      dataMap[timeStr].power1 = item.power;
+      dataMap[timeStr].apparent1 = item.apparent_power;
+    });
+
+    zona2Data.forEach((item) => {
+      const timeStr = new Date(item.created_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      if (!dataMap[timeStr]) dataMap[timeStr] = { time: timeStr };
+      dataMap[timeStr].power2 = item.power;
+      dataMap[timeStr].apparent2 = item.apparent_power;
+    });
+
+    return Object.values(dataMap)
+      .sort((a: any, b: any) => a.time.localeCompare(b.time))
+      .slice(-50);
+  }, [zona1Data, zona2Data]);
+
+  // New real-time calculated metrics
+  const latestZona1 = useMemo(() => {
+    const result = zona1Data.length > 0 ? zona1Data[zona1Data.length - 1] : {
+      power: 0,
+      power_factor: 0,
+      status_ai: 'N/A',
+      voltage: 0,
+      current: 0,
+      apparent_power: 0,
+      z_score: 0
+    };
+    console.log('latestZona1:', result);
+    return result;
+  }, [zona1Data]);
+
+  const latestZona2 = useMemo(() => {
+    const result = zona2Data.length > 0 ? zona2Data[zona2Data.length - 1] : {
+      power: 0,
+      power_factor: 0,
+      status_ai: 'N/A',
+      voltage: 0,
+      current: 0,
+      apparent_power: 0,
+      z_score: 0
+    };
+    console.log('latestZona2:', result);
+    return result;
+  }, [zona2Data]);
+
+  const totalPower = useMemo(() => {
+    return latestZona1.power + latestZona2.power;
+  }, [latestZona1.power, latestZona2.power]);
+
+  const estimatedMonthlyCost = useMemo(() => {
+    const totalKw = totalPower / 1000;
+    const dailyCost = totalKw * 24 * 1500; // 24 hours * 1500 IDR/kWh
+    const monthlyCost = dailyCost * 30; // 30 days
+    return `Rp ${Math.floor(monthlyCost).toLocaleString('id-ID')}`;
+  }, [totalPower]);
+
+  const avgPowerFactor = useMemo(() => {
+    return (latestZona1.power_factor + latestZona2.power_factor) / 2;
+  }, [latestZona1.power_factor, latestZona2.power_factor]);
+
+  const systemStatus = useMemo(() => {
+    if (latestZona1.status_ai === 'OVERLOAD' || latestZona2.status_ai === 'OVERLOAD') {
+      return 'CRITICAL';
+    } else if (latestZona1.status_ai === 'BOROS' || latestZona2.status_ai === 'BOROS') {
+      return 'WARNING';
+    } else {
+      return 'HEALTHY';
+    }
+  }, [latestZona1.status_ai, latestZona2.status_ai]);
 
   const latestZona1Data = zona1Data[zona1Data.length - 1] ?? null;
   const latestPowerFactor = latestZona1Data?.power_factor ?? 0;
@@ -106,7 +172,7 @@ export default function App() {
   const latestStatusTextClass = latestStatusAI === 'HEMAT' ? 'text-emerald-400' : latestStatusAI === 'BOROS' ? 'text-red-400' : 'text-white/70';
 
   // Capacity calculation
-  const MAX_CAPACITY_WATT = 7700;
+  const MAX_CAPACITY_WATT = 3520;
   const currentPower = latestZona1Data?.power || 0;
   const capacityPercentage = Math.min((currentPower / MAX_CAPACITY_WATT) * 100, 100);
 
@@ -256,15 +322,15 @@ export default function App() {
 
   const maxCapacityWatts = dynamicMaxCapacity * 1000;
 
-  // Calculate predictions for KPIs
-  const peakData = energyData.length > 0 ? energyData.reduce((max, current) =>
-    (current.power + current.apparent_power) > (max.power + max.apparent_power) ? current : max
-  , energyData[0]) : { time: 'N/A', power: 0, apparent_power: 0 };
+  // 2. Perbaiki peakData agar mengambil data langsung dari zona1Data (mencegah error merah)
+  const peakData = zona1Data.length > 0 ? zona1Data.reduce((max: any, current: any) =>
+    ((current.power || 0) + (current.apparent_power || 0)) > ((max.power || 0) + (max.apparent_power || 0)) ? current : max
+  , zona1Data[0]) : { power: 0, apparent_power: 0 };
 
   const latestEfficiencyPercentage = latestEfficiencyRatio > 0 ? `${(latestEfficiencyRatio * 100).toFixed(1)}%` : 'N/A';
   const systemLoad = maxCapacityWatts > 0 ? (((peakData.power + peakData.apparent_power) / maxCapacityWatts) * 100).toFixed(1) : '0.0';
 
-  if (loading) {
+  if (isLoading || loadingData) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#0a1929] text-white">
         <div className="text-xl font-semibold">Loading data...</div>
@@ -336,7 +402,7 @@ export default function App() {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 p-8 overflow-auto bg-gradient-to-br from-[#0a1929] to-[#0d1f35]">
+      <main className={`${activeMenu === 'Dashboard' ? 'flex-1' : 'flex-1'} p-8 overflow-auto bg-gradient-to-br from-[#0a1929] to-[#0d1f35]`}>
         {/* Header */}
         <div className="mb-8">
           <h2 className="text-3xl font-bold mb-2">{activeMenu}</h2>
@@ -627,109 +693,224 @@ export default function App() {
           </motion.div>
         </div>
 
-        {/* Main Section: Chart */}
-        <div className="grid grid-cols-1 gap-6 mb-8">
-          {/* Real-time Power Chart (Full width) */}
+        {/* Hero KPI Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+          {/* Total Active Power */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4 }}
+            className="bg-[#1a2942] border border-white/10 rounded-xl p-6 shadow-xl"
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <Zap className={`w-6 h-6 ${totalPower > MAX_CAPACITY_WATT * 0.8 ? 'text-red-400' : 'text-emerald-400'}`} />
+              <div className="text-sm text-white/60">Total Active Power</div>
+            </div>
+            <div className={`text-3xl font-bold ${totalPower > MAX_CAPACITY_WATT * 0.8 ? 'text-red-400' : 'text-emerald-400'}`}>
+              {totalPower.toLocaleString()} W
+            </div>
+          </motion.div>
+
+          {/* Est. Monthly Cost */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.1 }}
+            className="bg-[#1a2942] border border-white/10 rounded-xl p-6 shadow-xl"
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <DollarSign className="w-6 h-6 text-emerald-400" />
+              <div className="text-sm text-white/60">Est. Monthly Cost</div>
+            </div>
+            <div className="text-3xl font-bold text-emerald-400">{estimatedMonthlyCost}</div>
+            <div className="text-xs text-white/50 mt-1">Rate: Rp1.500/kWh</div>
+          </motion.div>
+
+          {/* System Efficiency */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.2 }}
+            className="bg-[#1a2942] border border-white/10 rounded-xl p-6 shadow-xl"
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <Activity className="w-6 h-6 text-blue-400" />
+              <div className="text-sm text-white/60">System Efficiency</div>
+            </div>
+            <div className="text-3xl font-bold text-blue-400">{(avgPowerFactor * 100).toFixed(1)}%</div>
+          </motion.div>
+
+          {/* System Health */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.3 }}
+            className="bg-[#1a2942] border border-white/10 rounded-xl p-6 shadow-xl"
+          >
+            <div className="flex items-center gap-3 mb-4">
+              {systemStatus === 'HEALTHY' ? (
+                <ShieldCheck className="w-6 h-6 text-emerald-400" />
+              ) : (
+                <ShieldAlert className={`w-6 h-6 ${systemStatus === 'WARNING' ? 'text-yellow-400' : 'text-red-500'}`} />
+              )}
+              <div className="text-sm text-white/60">System Health</div>
+            </div>
+            <div className={`text-3xl font-bold ${
+              systemStatus === 'HEALTHY' ? 'text-emerald-400' :
+              systemStatus === 'WARNING' ? 'text-yellow-400' : 'text-red-500'
+            }`}>
+              {systemStatus}
+            </div>
+          </motion.div>
+        </div>
+
+        {/* Main Section: Combined Chart */}
+        <div className="grid grid-cols-1 mb-8">
           <div className="bg-gradient-to-br from-[#1a2942] to-[#0d1f35] p-6 rounded-2xl border border-cyan-500/20 shadow-xl">
             <h3 className="text-lg font-semibold mb-6 flex items-center gap-2">
               <BarChart3 className="w-5 h-5 text-cyan-400" />
-              Real-time Power vs Apparent Power
+              Real-time Power Comparison: Zona 1 (Beban Tinggi) vs Zona 2 (Stabil)
             </h3>
-            <ResponsiveContainer width="100%" height={400}>
-              <LineChart data={energyData} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" />
-                <XAxis
-                  dataKey="time"
-                  stroke="#ffffff60"
-                  tick={{ fill: '#ffffff60', fontSize: 12 }}
-                />
-                <YAxis
-                  stroke="#ffffff60"
-                  tick={{ fill: '#ffffff60', fontSize: 12 }}
-                  label={{ value: 'W / VA', angle: -90, position: 'insideLeft', fill: '#ffffff60' }}
-                  domain={[0, (dataMax: number) => Math.max(dataMax, MAX_CAPACITY_WATT) + 500]}
-                />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#0a1929',
-                    border: '1px solid rgba(6, 182, 212, 0.3)',
-                    borderRadius: '12px',
-                    color: '#ffffff',
-                  }}
-                  labelStyle={{ color: '#06b6d4', fontWeight: 'bold' }}
-                />
-
-                {/* Max Capacity Line */}
-                <ReferenceLine
-                  key="reference-max-capacity"
-                  y={MAX_CAPACITY_WATT}
-                  stroke="red"
-                  strokeDasharray="3 3"
-                  label={{
-                    value: 'Max Limit (7700W)',
-                    position: 'top',
-                    fill: 'red',
-                    fontSize: 12
-                  }}
-                />
-
-                <Line
-                  key="line-power"
-                  type="monotone"
-                  dataKey="power"
-                  stroke="#06b6d4"
-                  strokeWidth={3}
-                  dot={{ fill: '#06b6d4', r: 5 }}
-                  name="Actual Power (W)"
-                  activeDot={{ r: 7 }}
-                />
-                <Line
-                  key="line-apparent-power"
-                  type="monotone"
-                  dataKey="apparent_power"
-                  stroke="#64748b"
-                  strokeWidth={2}
-                  dot={false}
-                  name="Apparent Power (VA)"
-                />
-              </LineChart>
-            </ResponsiveContainer>
-
-            {/* Legend */}
-            <div className="flex items-center justify-center gap-6 mt-4">
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-1 bg-cyan-400 rounded" />
-                <span className="text-xs text-white/70">Actual Power (W)</span>
+            
+            {loadingData ? (
+              <div className="flex items-center justify-center h-64">
+                <RefreshCw className="w-8 h-8 animate-spin text-cyan-400" />
               </div>
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-1 bg-slate-400 rounded" />
-                <span className="text-xs text-white/70">Apparent Power (VA)</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-4 h-1 bg-red-500 rounded" style={{ backgroundImage: 'repeating-linear-gradient(90deg, #ef4444 0, #ef4444 4px, transparent 4px, transparent 8px)' }} />
-                <span className="text-xs text-white/70">Max Capacity</span>
-              </div>
+            ) : dataError ? (
+              <div className="text-red-400 text-center">Error memuat data grafik</div>
+            ) : (
+              <ResponsiveContainer width="100%" height={400}>
+                <LineChart data={combinedEnergyData} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" />
+                  <XAxis dataKey="time" stroke="#ffffff60" tick={{ fill: '#ffffff60', fontSize: 12 }} />
+                  <YAxis 
+                    yAxisId="left"
+                    stroke="#ffffff60" 
+                    opacity={0.5}
+                    tick={{ fill: '#ffffff60', fontSize: 12 }} 
+                    label={{ value: 'Zona 1 (W)', angle: -90, position: 'insideLeft', fill: '#ffffff60' }} 
+                    domain={[0, (dataMax: number) => Math.max(dataMax, MAX_CAPACITY_WATT) + 500]} 
+                  />
+                  <YAxis 
+                    yAxisId="right"
+                    orientation="right"
+                    stroke="#a855f7" 
+                    opacity={0.8}
+                    tick={{ fill: '#a855f7', fontSize: 12 }} 
+                    label={{ value: 'Zona 2 (W)', angle: 90, position: 'insideRight', fill: '#a855f7' }} 
+                  />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#0a1929', border: '1px solid rgba(6, 182, 212, 0.3)', borderRadius: '12px', color: '#ffffff' }}
+                  />
+
+                  <ReferenceLine
+                    yAxisId="left"
+                    y={MAX_CAPACITY_WATT}
+                    stroke="red"
+                    strokeDasharray="3 3"
+                    label={{ value: `Max Limit`, position: 'top', fill: 'red', fontSize: 12 }}
+                  />
+
+                  {/* Garis Zona 1 (Warna Cyan/Biru Muda) */}
+                  <Line yAxisId="left" type="monotone" dataKey="power1" stroke="#06b6d4" strokeWidth={3} dot={{ fill: '#06b6d4', r: 4 }} connectNulls={true} name="Z1 Actual Power (W)" />
+                  <Line yAxisId="left" type="monotone" dataKey="apparent1" stroke="#3b82f6" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={true} name="Z1 Apparent (VA)" />
+                  
+                  {/* Garis Zona 2 (Warna Purple) */}
+                  <Line yAxisId="right" type="monotone" dataKey="power2" stroke="#a855f7" strokeWidth={3} dot={{ fill: '#a855f7', r: 4 }} connectNulls={true} name="Z2 Actual Power (W)" />
+                  <Line yAxisId="right" type="monotone" dataKey="apparent2" stroke="#9333ea" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls={true} name="Z2 Apparent (VA)" />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
+
+            {/* Legend Khusus */}
+            <div className="flex flex-wrap items-center justify-center gap-6 mt-4">
+              <div className="flex items-center gap-2"><div className="w-4 h-1 bg-[#06b6d4] rounded" /><span className="text-xs text-white/70">Z1 Actual (W)</span></div>
+              <div className="flex items-center gap-2"><div className="w-4 h-1 bg-[#3b82f6] rounded border-t border-dashed" /><span className="text-xs text-white/70">Z1 Apparent (VA)</span></div>
+              <div className="flex items-center gap-2"><div className="w-4 h-1 bg-[#a855f7] rounded" /><span className="text-xs text-white/70">Z2 Actual (W)</span></div>
+              <div className="flex items-center gap-2"><div className="w-4 h-1 bg-[#9333ea] rounded border-t border-dashed" /><span className="text-xs text-white/70">Z2 Apparent (VA)</span></div>
             </div>
-
+            
             <div className="mt-6 pt-6 border-t border-white/10">
-              <div className="text-sm text-white/60">Realtime Zona_1 power metrics are plotted against the latest timestamp.</div>
+              <div className="text-sm text-white/60">Perbandingan real-time fluktuasi beban listrik antar zona.</div>
             </div>
           </div>
         </div>
 
-        {/* AI Insights Feed */}
-        <AIInsights />
-          </div>
-        )}
+        {/* Zone Details Comparison */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Zona 1 Card */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4 }}
+            className="bg-[#1a2942] border border-white/10 rounded-xl p-6 shadow-xl relative"
+          >
+            <div className={`absolute top-4 right-4 px-3 py-1 rounded-full text-xs font-semibold ${
+              latestZona1.status_ai === 'OVERLOAD' ? 'bg-red-500/20 text-red-400 border border-red-500/30 animate-pulse' :
+              latestZona1.status_ai === 'BOROS' ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' :
+              'bg-green-500/20 text-green-400 border border-green-500/30'
+            }`}>
+              {latestZona1.status_ai}
+            </div>
+            <h3 className="text-lg font-semibold mb-4 text-cyan-400">Zona 1 (Heavy Load)</h3>
+            <div className="grid grid-cols-3 gap-4">
+              <div className="text-center">
+                <span className="text-xs text-white/60 block mb-1">Voltage</span>
+                <span className="text-lg font-bold text-cyan-400">{latestZona1.voltage.toFixed(1)} V</span>
+              </div>
+              <div className="text-center">
+                <span className="text-xs text-white/60 block mb-1">Current</span>
+                <span className="text-lg font-bold text-cyan-400">{latestZona1.current.toFixed(2)} A</span>
+              </div>
+              <div className="text-center">
+                <span className="text-xs text-white/60 block mb-1">Apparent</span>
+                <span className="text-lg font-bold text-cyan-400">{latestZona1.apparent_power.toFixed(0)} VA</span>
+              </div>
+            </div>
+          </motion.div>
 
-        {/* Settings View */}
-        {activeMenu === 'Settings' && (
-          <div className="bg-gradient-to-br from-[#1a2942] to-[#0d1f35] p-8 rounded-2xl border border-white/10 shadow-xl">
-            <h3 className="text-2xl font-semibold mb-4">System Settings</h3>
-            <p className="text-white/60">Settings panel coming soon...</p>
-          </div>
-        )}
+          {/* Zona 2 Card */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.1 }}
+            className="bg-[#1a2942] border border-white/10 rounded-xl p-6 shadow-xl relative"
+          >
+            <div className={`absolute top-4 right-4 px-3 py-1 rounded-full text-xs font-semibold ${
+              latestZona2.status_ai === 'OVERLOAD' ? 'bg-red-500/20 text-red-400 border border-red-500/30 animate-pulse' :
+              latestZona2.status_ai === 'BOROS' ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' :
+              'bg-green-500/20 text-green-400 border border-green-500/30'
+            }`}>
+              {latestZona2.status_ai}
+            </div>
+            <h3 className="text-lg font-semibold mb-4 text-violet-400">Zona 2 (Stable Load)</h3>
+            <div className="grid grid-cols-3 gap-4">
+              <div className="text-center">
+                <span className="text-xs text-white/60 block mb-1">Voltage</span>
+                <span className="text-lg font-bold text-violet-400">{latestZona2.voltage.toFixed(1)} V</span>
+              </div>
+              <div className="text-center">
+                <span className="text-xs text-white/60 block mb-1">Current</span>
+                <span className="text-lg font-bold text-violet-400">{latestZona2.current.toFixed(2)} A</span>
+              </div>
+              <div className="text-center">
+                <span className="text-xs text-white/60 block mb-1">Apparent</span>
+                <span className="text-lg font-bold text-violet-400">{latestZona2.apparent_power.toFixed(0)} VA</span>
+              </div>
+            </div>
+          </motion.div>
+        </div>
+
+      </div>
+    )}
       </main>
+
+      {/* Right Panel - AI Insights (Dashboard only) */}
+      {activeMenu === 'Dashboard' && (
+        <aside className="w-80 bg-[#0d1f35] border-l border-cyan-500/10 p-6 overflow-auto">
+          <AIInsights />
+        </aside>
+      )}
     </div>
-  );
+);
 }
